@@ -1,10 +1,11 @@
+import base64
 import datetime
+import gzip
 import sys
 from unittest.mock import MagicMock
 
 import jwt
 import pytest
-from cryptography.hazmat.primitives.asymmetric import rsa
 
 # --- 1. Mock Frappe module before importing auth ---
 frappe_mock = MagicMock()
@@ -32,6 +33,13 @@ TEST_HMAC_SECRET = "super_secret_vouch_jwt_signing_key_32_bytes!!"
 @pytest.fixture(autouse=True)
 def reset_frappe_state():
     frappe_mock.reset_mock()
+    frappe_mock.get_request_header.side_effect = None
+    frappe_mock.get_request_header.return_value = None
+    frappe_mock.db.exists.side_effect = None
+    frappe_mock.db.exists.return_value = False
+    frappe_mock.set_user.side_effect = None
+    frappe_mock.new_doc.side_effect = None
+    frappe_mock.request = None
 
     config_store = {}
     frappe_mock.conf = config_store
@@ -48,29 +56,6 @@ def reset_frappe_state():
 
     frappe_mock.log_error.side_effect = lambda title="", message="": None
     yield
-
-
-@pytest.fixture
-def rsa_keypair():
-    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    public_key = private_key.public_key()
-    jwks = {
-        "keys": [
-            {
-                "kty": "RSA",
-                "use": "sig",
-                "kid": "test-kid-123",
-                "n": jwt.utils.base64url_encode(
-                    public_key.public_numbers().n.to_bytes(256, "big")
-                ).decode("utf-8"),
-                "e": jwt.utils.base64url_encode(
-                    public_key.public_numbers().e.to_bytes(3, "big")
-                ).decode("utf-8"),
-                "alg": "RS256",
-            }
-        ]
-    }
-    return private_key, jwks
 
 
 def set_frappe_config(conf_dict: dict):
@@ -107,10 +92,28 @@ def test_to_bool(input_val, expected):
         ("Authorization", "Bearer", "", None),
     ],
 )
-def test_extract_token(header_name, prefix, incoming_header, expected_token):
+def test_extract_token_from_header(
+    header_name, prefix, incoming_header, expected_token
+):
     frappe_mock.get_request_header.return_value = incoming_header
     config = {"header_name": header_name, "header_prefix": prefix}
     assert extract_token(config) == expected_token
+
+
+def test_extract_token_from_vouch_cookie_fallback():
+    raw_jwt = "header.payload.signature"
+    compressed_b64 = base64.urlsafe_b64encode(
+        gzip.compress(raw_jwt.encode("utf-8"))
+    ).decode("utf-8")
+
+    def get_header(name, default=""):
+        if name == "Cookie":
+            return f"other_cookie=123; VouchCookie={compressed_b64}; session_id=xyz"
+        return default
+
+    frappe_mock.get_request_header.side_effect = get_header
+    config = {"header_name": "X-Vouch-Token", "header_prefix": ""}
+    assert extract_token(config) == raw_jwt
 
 
 # --- 4. Functional Tests ---
@@ -126,7 +129,7 @@ def test_validate_vouch_jwt_hs256_success():
     user_email = "dev@example.com"
     exp = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=30)
     token = jwt.encode(
-        {"email": user_email, "exp": int(exp.timestamp())},
+        {"username": user_email, "exp": int(exp.timestamp())},
         TEST_HMAC_SECRET,
         algorithm="HS256",
     )
@@ -134,16 +137,53 @@ def test_validate_vouch_jwt_hs256_success():
     set_frappe_config(
         {
             "vouch_jwt_enabled": True,
-            "vouch_header_name": "Authorization",
-            "vouch_header_prefix": "Bearer",
+            "vouch_header_name": "X-Vouch-Token",
+            "vouch_header_prefix": "",
             "vouch_jwt_secret": TEST_HMAC_SECRET,
             "vouch_jwt_algorithms": ["HS256"],
-            "vouch_email_claim": "email",
+            "vouch_email_claim": "username",
             "vouch_cache_disabled": True,
             "vouch_enable_logging": True,
         }
     )
-    frappe_mock.get_request_header.return_value = f"Bearer {token}"
+    frappe_mock.get_request_header.return_value = token
+    frappe_mock.db.exists.return_value = True
+
+    validate_vouch_jwt()
+
+    frappe_mock.set_user.assert_called_once_with(user_email)
+
+
+def test_validate_vouch_jwt_via_vouch_cookie():
+    user_email = "cookie_user@example.com"
+    exp = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=30)
+    token = jwt.encode(
+        {"username": user_email, "exp": int(exp.timestamp())},
+        TEST_HMAC_SECRET,
+        algorithm="HS256",
+    )
+    compressed_b64 = base64.urlsafe_b64encode(
+        gzip.compress(token.encode("utf-8"))
+    ).decode("utf-8")
+
+    set_frappe_config(
+        {
+            "vouch_jwt_enabled": True,
+            "vouch_header_name": "X-Vouch-Token",
+            "vouch_header_prefix": "",
+            "vouch_jwt_secret": TEST_HMAC_SECRET,
+            "vouch_email_claim": "username",
+            "vouch_cache_disabled": True,
+            "vouch_enable_logging": True,
+        }
+    )
+
+    def get_header(name, default=""):
+        if name == "Cookie":
+            return f"VouchCookie={compressed_b64}"
+        return default
+
+    frappe_mock.get_request_header.side_effect = get_header
     frappe_mock.db.exists.return_value = True
 
     validate_vouch_jwt()
@@ -156,7 +196,7 @@ def test_validate_vouch_jwt_auto_creates_user():
     exp = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=30)
     token = jwt.encode(
         {
-            "email": user_email,
+            "username": user_email,
             "given_name": "Alex",
             "family_name": "Doe",
             "exp": int(exp.timestamp()),
@@ -172,7 +212,7 @@ def test_validate_vouch_jwt_auto_creates_user():
             "vouch_header_prefix": "",
             "vouch_jwt_secret": TEST_HMAC_SECRET,
             "vouch_jwt_algorithms": ["HS256"],
-            "vouch_email_claim": "email",
+            "vouch_email_claim": "username",
             "vouch_create_user": True,
             "vouch_cache_disabled": True,
             "vouch_enable_logging": True,
@@ -197,7 +237,7 @@ def test_validate_vouch_jwt_auto_creates_user():
 def test_validate_vouch_jwt_expired_token():
     expired = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(hours=1)
     token = jwt.encode(
-        {"email": "expired@example.com", "exp": int(expired.timestamp())},
+        {"username": "expired@example.com", "exp": int(expired.timestamp())},
         TEST_HMAC_SECRET,
         algorithm="HS256",
     )
@@ -224,7 +264,7 @@ def test_validate_vouch_jwt_invalid_signature():
     user_email = "attacker@example.com"
     exp = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(minutes=30)
     token = jwt.encode(
-        {"email": user_email, "exp": int(exp.timestamp())},
+        {"username": user_email, "exp": int(exp.timestamp())},
         bad_secret,
         algorithm="HS256",
     )
@@ -236,7 +276,7 @@ def test_validate_vouch_jwt_invalid_signature():
             "vouch_header_prefix": "Bearer",
             "vouch_jwt_secret": TEST_HMAC_SECRET,
             "vouch_jwt_algorithms": ["HS256"],
-            "vouch_email_claim": "email",
+            "vouch_email_claim": "username",
             "vouch_cache_disabled": True,
             "vouch_enable_logging": False,
         }
@@ -250,7 +290,7 @@ def test_validate_vouch_jwt_invalid_signature():
 def test_preserves_form_dict_after_set_user():
     token = jwt.encode(
         {
-            "email": "test@example.com",
+            "username": "test@example.com",
             "exp": int(
                 (
                     datetime.datetime.now(datetime.timezone.utc)
@@ -268,7 +308,7 @@ def test_preserves_form_dict_after_set_user():
             "vouch_header_name": "Authorization",
             "vouch_header_prefix": "Bearer",
             "vouch_jwt_secret": TEST_HMAC_SECRET,
-            "vouch_email_claim": "email",
+            "vouch_email_claim": "username",
             "vouch_cache_disabled": True,
             "vouch_enable_logging": False,
         }
