@@ -17,11 +17,14 @@ bench install-app vouch_frappe_auth
 `vouch_frappe_auth` is a Frappe authentication hook designed specifically for **Vouch Proxy** using Vouch's internal HS256 JWT signature (`vouch.jwt.secret`).
 
 #### Cookie & Token Extraction
+
 On incoming HTTP requests, the middleware extracts the JWT in the following order:
+
 1. **Request Header**: Value from configured header (e.g., `X-Vouch-Token` or `Authorization: Bearer <token>`).
 2. **`VouchCookie`**: If no header is present, extracts the `VouchCookie` sent by the browser. Vouch compresses its JWT using `gzip` and encodes it in URL-safe base64. The middleware automatically decodes and decompresses the `VouchCookie` to retrieve the original Vouch JWT.
 
 #### Session Lifetime & Upstream IdP
+
 - **Internal Vouch Token Only**: Authentication validates the symmetric HMAC (`HS256`) signature signed by Vouch Proxy using `vouch_jwt_secret` (`vouch.jwt.secret` in Vouch config).
 - **Session Duration in Vouch**: The middleware does not poll or sync short-lived (e.g. 1-hour) upstream IdP token expirations directly once the Vouch session is established. The active session length in Frappe is bounded by the Vouch cookie/JWT expiration (`vouch.cookie.maxAge` in Vouch config).
 - **Longer Browser Sessions**: To keep users logged in for longer periods in Frappe, configure the browser session duration in Vouch Proxy (`vouch.cookie.maxAge` / session timeout).
@@ -66,18 +69,18 @@ Set these keys in your `site_config.json` or `common_site_config.json`:
 
 #### Configuration Options
 
-| Option | Default | Description |
-|---|---|---|
-| `vouch_jwt_enabled` | `0` | Enable Vouch JWT authentication hook (`1` / `true`) |
-| `vouch_jwt_secret` | `null` | Symmetric secret configured in Vouch Proxy (`vouch.jwt.secret`) |
-| `vouch_jwt_algorithms` | `["HS256"]` | Allowed JWT signing algorithms |
-| `vouch_header_name` | `"X-Vouch-Token"` | HTTP header to inspect for JWT |
-| `vouch_header_prefix` | `""` | Optional prefix in header (e.g. `"Bearer"`) |
-| `vouch_email_claim` | `"username"` | Claim name mapped to Frappe User (`"username"`, `"email"`, or custom claim) |
-| `vouch_create_user` | `1` | Automatically create User document if not existing |
-| `vouch_default_roles` | `["System User"]` | Roles assigned to newly created users |
-| `vouch_cache_disabled` | `0` | Set to `1` to disable Redis token verification caching |
-| `vouch_enable_logging` | `1` | Log authentication failures to Frappe Error Log |
+| Option                 | Default           | Description                                                                 |
+| ---------------------- | ----------------- | --------------------------------------------------------------------------- |
+| `vouch_jwt_enabled`    | `0`               | Enable Vouch JWT authentication hook (`1` / `true`)                         |
+| `vouch_jwt_secret`     | `null`            | Symmetric secret configured in Vouch Proxy (`vouch.jwt.secret`)             |
+| `vouch_jwt_algorithms` | `["HS256"]`       | Allowed JWT signing algorithms                                              |
+| `vouch_header_name`    | `"X-Vouch-Token"` | HTTP header to inspect for JWT                                              |
+| `vouch_header_prefix`  | `""`              | Optional prefix in header (e.g. `"Bearer"`)                                 |
+| `vouch_email_claim`    | `"username"`      | Claim name mapped to Frappe User (`"username"`, `"email"`, or custom claim) |
+| `vouch_create_user`    | `1`               | Automatically create User document if not existing                          |
+| `vouch_default_roles`  | `["System User"]` | Roles assigned to newly created users                                       |
+| `vouch_cache_disabled` | `0`               | Set to `1` to disable Redis token verification caching                      |
+| `vouch_enable_logging` | `1`               | Log authentication failures to Frappe Error Log                             |
 
 ### Contributing
 
